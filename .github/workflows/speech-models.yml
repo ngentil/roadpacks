@@ -1,0 +1,47 @@
+# Mirrors the speech models the Transcribe app downloads (sherpa-onnx's Whisper int8 models,
+# pyannote speaker segmentation, NeMo TitaNet speaker embeddings, Silero VAD) as single files on
+# the release tagged "speech-models", so the phone downloads only what it needs from one place:
+#   https://github.com/ngentil/roadpacks/releases/download/speech-models/<file>
+# Upstream archives also hold full-precision copies and test clips, several times bigger.
+name: Speech models
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/speech-models.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SRC: https://github.com/k2-fsa/sherpa-onnx/releases/download
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch
+        run: |
+          set -e
+          mkdir -p out
+          for m in base.en small.en; do
+            curl -sSfL $SRC/asr-models/sherpa-onnx-whisper-$m.tar.bz2 | tar xj
+            ls -la sherpa-onnx-whisper-$m
+            cp sherpa-onnx-whisper-$m/$m-encoder.int8.onnx out/whisper-$m-encoder.int8.onnx
+            cp sherpa-onnx-whisper-$m/$m-decoder.int8.onnx out/whisper-$m-decoder.int8.onnx
+            cp sherpa-onnx-whisper-$m/$m-tokens.txt out/whisper-$m-tokens.txt
+            rm -rf sherpa-onnx-whisper-$m
+          done
+          curl -sSfL $SRC/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 | tar xj
+          ls -la sherpa-onnx-pyannote-segmentation-3-0
+          cp sherpa-onnx-pyannote-segmentation-3-0/model.onnx out/pyannote-segmentation-3-0.onnx
+          curl -sSfL -o out/nemo_en_titanet_small.onnx $SRC/speaker-recongition-models/nemo_en_titanet_small.onnx
+          curl -sSfL -o out/silero_vad.onnx $SRC/asr-models/silero_vad.onnx
+          ls -la out
+          (cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+      - name: Publish
+        run: |
+          gh release view speech-models >/dev/null 2>&1 || gh release create speech-models --title "Speech models" \
+            --notes "Speech models for the Transcribe app, mirrored from sherpa-onnx (k2-fsa) releases: OpenAI Whisper (MIT), pyannote segmentation 3.0 (MIT), NVIDIA NeMo TitaNet (CC-BY-4.0), Silero VAD (MIT)."
+          gh release upload speech-models out/* --clobber
