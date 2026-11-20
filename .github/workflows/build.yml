@@ -1,0 +1,67 @@
+# Builds the offline street maps My Camera downloads per city, from OpenStreetMap (Geofabrik
+# extracts), and publishes them with index.json as assets of the release tagged "maps":
+#   https://github.com/ngentil/roadpacks/releases/download/maps/<city>.rpk
+# Runs when the city list or builder changes, and monthly so roads stay current.
+name: Build maps
+on:
+  push:
+    branches: [main]
+    paths: ['cities.json', 'build.py', '.github/workflows/build.yml']
+  schedule:
+    - cron: '17 15 3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
+          pip install -q osmium
+      - name: Download OpenStreetMap
+        run: |
+          # every Geofabrik region a city in cities.json needs ("region" field)
+          for r in $(python3 -c "import json;print(' '.join(sorted({c['region'] for c in json.load(open('cities.json'))})))"); do
+            f=$(echo $r | tr / _)
+            curl -sSfL -o $f.osm.pbf https://download.geofabrik.de/$r-latest.osm.pbf
+            osmium tags-filter $f.osm.pbf w/highway -o $f-hw.osm.pbf --overwrite
+            rm $f.osm.pbf
+          done
+          ls -la *.pbf
+      - name: Build
+        run: |
+          set -e
+          mkdir -p out
+          python3 -c "
+          import json
+          for c in json.load(open('cities.json')):
+              print(c['id'], c['region'].replace('/', '_'), *c['bbox'], sep='\t')
+          " > cities.tsv
+          while IFS=$'\t' read -r id r a b c d; do
+            osmium extract -b "$b,$a,$d,$c" -s complete_ways $r-hw.osm.pbf -o city.osm.pbf --overwrite
+            python3 build.py city.osm.pbf "out/$id.rpk" $a $b $c $d
+          done < cities.tsv
+          python3 -c "
+          import json, os, time
+          cs = json.load(open('cities.json'))
+          for c in cs:
+              c['file'] = c['id'] + '.rpk'
+              c['size'] = os.path.getsize('out/' + c['file'])
+              c['date'] = time.strftime('%Y-%m-%d')
+              c.pop('region', None)
+          json.dump({'attribution': '© OpenStreetMap contributors (ODbL)', 'cities': cs}, open('out/index.json', 'w'))
+          "
+          ls -la out
+      - name: Publish
+        run: |
+          gh release view maps >/dev/null 2>&1 || gh release create maps --title "Street maps" \
+            --notes "Offline street maps for My Camera. Data © OpenStreetMap contributors, ODbL. Rebuilt monthly."
+          gh release upload maps out/* --clobber
